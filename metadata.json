@@ -1,0 +1,6 @@
+{
+  "name": "CastNotify",
+  "description": "Mirror notifications from Android Phone to Android TV over local Wi-Fi with WebSocket and overlay banners.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
