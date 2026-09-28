@@ -1,17 +1,12 @@
 package com.example.ui.tv
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -32,7 +27,6 @@ import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -53,10 +47,62 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.NotificationPayload
+import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * Bottom-Right Live Overlay Stack for TV screen preview.
+ * Displays up to 4 notifications stacked vertically at the bottom right of the screen,
+ * with each notification having its own 5-second countdown progress bar.
+ */
+@Composable
+fun BottomRightOverlayStack(
+    stackedItems: List<NotificationPayload>,
+    durationSeconds: Int = 5,
+    onDismissItem: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .padding(bottom = 28.dp, end = 28.dp),
+        horizontalAlignment = Alignment.End,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        stackedItems.forEach { payload ->
+            key(payload.id) {
+                var progress by remember(payload.id) { mutableFloatStateOf(1f) }
+
+                LaunchedEffect(payload.id) {
+                    val startTime = System.currentTimeMillis()
+                    val totalMs = durationSeconds * 1000L
+                    while (System.currentTimeMillis() - startTime < totalMs) {
+                        val elapsed = System.currentTimeMillis() - startTime
+                        progress = (1f - (elapsed.toFloat() / totalMs)).coerceIn(0f, 1f)
+                        delay(50)
+                    }
+                    progress = 0f
+                    onDismissItem(payload.id)
+                }
+
+                AnimatedVisibility(
+                    visible = true,
+                    enter = slideInHorizontally(initialOffsetX = { it }) + fadeIn(),
+                    exit = slideOutHorizontally(targetOffsetX = { it }) + fadeOut()
+                ) {
+                    NotificationBannerCard(
+                        payload = payload,
+                        progress = progress,
+                        onDismiss = { onDismissItem(payload.id) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+// Backward-compatible wrapper for single notification callers
 @Composable
 fun TopRightOverlayBanner(
     payload: NotificationPayload?,
@@ -64,41 +110,13 @@ fun TopRightOverlayBanner(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var progress by remember(payload?.id) { mutableFloatStateOf(1f) }
-
-    LaunchedEffect(payload?.id) {
-        if (payload != null) {
-            progress = 1f
-            val startTime = System.currentTimeMillis()
-            val totalMs = durationSeconds * 1000L
-            while (System.currentTimeMillis() - startTime < totalMs) {
-                val elapsed = System.currentTimeMillis() - startTime
-                progress = (1f - (elapsed.toFloat() / totalMs)).coerceIn(0f, 1f)
-                kotlinx.coroutines.delay(50)
-            }
-            progress = 0f
-            onDismiss()
-        }
-    }
-
-    Box(
-        modifier = modifier
-            .padding(top = 24.dp, end = 24.dp),
-        contentAlignment = Alignment.TopEnd
-    ) {
-        AnimatedVisibility(
-            visible = payload != null,
-            enter = slideInHorizontally(initialOffsetX = { it }) + fadeIn(),
-            exit = slideOutHorizontally(targetOffsetX = { it }) + fadeOut()
-        ) {
-            if (payload != null) {
-                NotificationBannerCard(
-                    payload = payload,
-                    progress = progress,
-                    onDismiss = onDismiss
-                )
-            }
-        }
+    if (payload != null) {
+        BottomRightOverlayStack(
+            stackedItems = listOf(payload),
+            durationSeconds = durationSeconds,
+            onDismissItem = { onDismiss() },
+            modifier = modifier
+        )
     }
 }
 
@@ -115,22 +133,22 @@ fun NotificationBannerCard(
 
     Surface(
         modifier = modifier
-            .widthIn(min = 340.dp, max = 420.dp)
-            .shadow(elevation = 16.dp, shape = RoundedCornerShape(20.dp))
+            .widthIn(min = 340.dp, max = 400.dp)
+            .shadow(elevation = 16.dp, shape = RoundedCornerShape(18.dp))
             .border(
                 width = 1.5.dp,
                 brush = Brush.linearGradient(
                     colors = listOf(Color(0xFF38BDF8), Color(0xFF6366F1), Color(0x33FFFFFF))
                 ),
-                shape = RoundedCornerShape(20.dp)
+                shape = RoundedCornerShape(18.dp)
             )
-            .clip(RoundedCornerShape(20.dp))
+            .clip(RoundedCornerShape(18.dp))
             .testTag("notification_overlay_card"),
-        color = Color(0xF00F172A), // Deep dark glass
+        color = Color(0xF20B132B), // Deep TV glass
         contentColor = Color.White
     ) {
         Column(
-            modifier = Modifier.padding(16.dp)
+            modifier = Modifier.padding(14.dp)
         ) {
             // Header Row: App Name Badge + Timestamp + Close button
             Row(
@@ -141,7 +159,7 @@ fun NotificationBannerCard(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         modifier = Modifier
-                            .size(28.dp)
+                            .size(26.dp)
                             .background(Color(0xFF0284C7), CircleShape),
                         contentAlignment = Alignment.Center
                     ) {
@@ -149,7 +167,7 @@ fun NotificationBannerCard(
                             imageVector = Icons.Default.Notifications,
                             contentDescription = "Notification",
                             tint = Color.White,
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(15.dp)
                         )
                     }
 
@@ -158,9 +176,9 @@ fun NotificationBannerCard(
                     Text(
                         text = payload.appName.uppercase(),
                         color = Color(0xFF38BDF8),
-                        fontSize = 13.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.sp
+                        letterSpacing = 0.5.sp
                     )
 
                     if (payload.privacyMode) {
@@ -178,12 +196,12 @@ fun NotificationBannerCard(
                     Text(
                         text = timeStr,
                         color = Color(0xFF94A3B8),
-                        fontSize = 12.sp
+                        fontSize = 11.sp
                     )
                     IconButton(
                         onClick = onDismiss,
                         modifier = Modifier
-                            .size(28.dp)
+                            .size(26.dp)
                             .padding(start = 4.dp)
                             .testTag("dismiss_banner_button")
                     ) {
@@ -191,39 +209,39 @@ fun NotificationBannerCard(
                             imageVector = Icons.Default.Close,
                             contentDescription = "Dismiss",
                             tint = Color(0xFF94A3B8),
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(15.dp)
                         )
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
             // Title
             Text(
                 text = if (payload.title.isNotBlank()) payload.title else payload.appName,
-                fontSize = 17.sp,
+                fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color(0xFFF8FAFC),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
 
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(2.dp))
 
             // Message Snippet
             Text(
                 text = payload.message.ifBlank { "Notification mirrored" },
-                fontSize = 14.sp,
+                fontSize = 13.sp,
                 color = Color(0xFFCBD5E1),
-                lineHeight = 20.sp,
+                lineHeight = 18.sp,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
-            // Auto-dismiss countdown bar
+            // Auto-dismiss countdown bar (5 seconds)
             LinearProgressIndicator(
                 progress = { progress },
                 modifier = Modifier
@@ -231,7 +249,7 @@ fun NotificationBannerCard(
                     .height(3.dp)
                     .clip(RoundedCornerShape(2.dp)),
                 color = Color(0xFF38BDF8),
-                trackColor = Color(0xFF334155),
+                trackColor = Color(0xFF1E293B),
             )
         }
     }

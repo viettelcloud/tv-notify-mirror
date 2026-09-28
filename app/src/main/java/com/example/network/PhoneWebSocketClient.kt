@@ -38,27 +38,48 @@ class PhoneWebSocketClient(
     private val _status = MutableStateFlow(ConnectionStatus.DISCONNECTED)
     val status: StateFlow<ConnectionStatus> = _status.asStateFlow()
 
+    private val _connectedHost = MutableStateFlow<String?>(null)
+    val connectedHost: StateFlow<String?> = _connectedHost.asStateFlow()
+
     private val _lastErrorMessage = MutableStateFlow<String?>(null)
     val lastErrorMessage: StateFlow<String?> = _lastErrorMessage.asStateFlow()
 
     fun connect(ip: String, port: Int = 8080) {
-        if (ip.isBlank()) {
+        val cleanIp = ip.trim()
+        if (cleanIp.isBlank()) {
             _status.value = ConnectionStatus.DISCONNECTED
-            _lastErrorMessage.value = "IP address is blank"
+            _lastErrorMessage.value = "TV IP address is blank"
+            _connectedHost.value = null
             return
         }
 
         shouldKeepConnected = true
-        val uriStr = if (ip.startsWith("ws://") || ip.startsWith("wss://")) ip else "ws://$ip:$port"
+        val uriStr = if (cleanIp.startsWith("ws://") || cleanIp.startsWith("wss://")) cleanIp else "ws://$cleanIp:$port"
         try {
             val uri = URI(uriStr)
+            // If already connected to this exact URI, no-op
+            if (_status.value == ConnectionStatus.CONNECTED && currentUri == uri && client?.isOpen == true) {
+                Log.d(TAG, "Already connected to $uri")
+                return
+            }
+
             currentUri = uri
-            disconnectInternal(false)
+            disconnectInternal(updateState = false)
             startClient(uri)
         } catch (e: Exception) {
             Log.e(TAG, "Invalid URI: $uriStr", e)
             _status.value = ConnectionStatus.ERROR
             _lastErrorMessage.value = "Invalid URI: ${e.localizedMessage}"
+            _connectedHost.value = null
+        }
+    }
+
+    fun retry() {
+        currentUri?.let { uri ->
+            Log.d(TAG, "Retrying connection to $uri...")
+            reconnectJob?.cancel()
+            disconnectInternal(updateState = false)
+            startClient(uri)
         }
     }
 
@@ -71,6 +92,7 @@ class PhoneWebSocketClient(
                 override fun onOpen(handshakedata: ServerHandshake?) {
                     Log.d(TAG, "Connected to TV: $uri")
                     _status.value = ConnectionStatus.CONNECTED
+                    _connectedHost.value = uri.host ?: uri.toString()
                     _lastErrorMessage.value = null
                 }
 
@@ -80,26 +102,37 @@ class PhoneWebSocketClient(
 
                 override fun onClose(code: Int, reason: String?, remote: Boolean) {
                     Log.d(TAG, "Connection closed. Code: $code, Reason: $reason, Remote: $remote")
-                    _status.value = ConnectionStatus.DISCONNECTED
-                    scheduleReconnect()
+                    _connectedHost.value = null
+                    if (shouldKeepConnected) {
+                        _status.value = ConnectionStatus.DISCONNECTED
+                        scheduleReconnect()
+                    } else {
+                        _status.value = ConnectionStatus.DISCONNECTED
+                    }
                 }
 
                 override fun onError(ex: Exception?) {
                     Log.e(TAG, "WebSocket client error", ex)
+                    _connectedHost.value = null
                     _status.value = ConnectionStatus.ERROR
                     _lastErrorMessage.value = ex?.localizedMessage ?: "Connection error"
-                    scheduleReconnect()
+                    if (shouldKeepConnected) {
+                        scheduleReconnect()
+                    }
                 }
             }
 
-            // Timeout in 4 seconds for connect
+            // Connection lost timeout
             client?.setConnectionLostTimeout(15)
             client?.connect()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start client", e)
             _status.value = ConnectionStatus.ERROR
+            _connectedHost.value = null
             _lastErrorMessage.value = e.localizedMessage
-            scheduleReconnect()
+            if (shouldKeepConnected) {
+                scheduleReconnect()
+            }
         }
     }
 
@@ -142,6 +175,7 @@ class PhoneWebSocketClient(
             Log.e(TAG, "Error closing client", e)
         }
         client = null
+        _connectedHost.value = null
         if (updateState) {
             _status.value = ConnectionStatus.DISCONNECTED
         }

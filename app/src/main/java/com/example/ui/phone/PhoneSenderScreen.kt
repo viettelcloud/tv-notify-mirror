@@ -4,8 +4,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -26,12 +31,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.PowerSettingsNew
@@ -42,6 +47,7 @@ import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -50,9 +56,10 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -63,6 +70,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -78,6 +86,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -85,6 +95,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.graphics.drawable.toBitmap
 import com.example.data.PreferencesManager
 import com.example.network.ConnectionStatus
 import com.example.network.DiscoveredTv
@@ -102,7 +113,8 @@ import java.util.Locale
 data class AppItem(
     val name: String,
     val packageName: String,
-    val isSystemApp: Boolean = false
+    val isSystemApp: Boolean = false,
+    val iconBitmap: ImageBitmap? = null
 )
 
 @Composable
@@ -127,6 +139,7 @@ fun PhoneSenderScreen(
     val mirrorLogs by NotificationMirrorService.mirrorLogs.collectAsState()
     val webSocketClient = remember { NotificationMirrorService.initClient(scope) }
     val connectionStatus by webSocketClient.status.collectAsState()
+    val connectedHost by webSocketClient.connectedHost.collectAsState()
     val lastError by webSocketClient.lastErrorMessage.collectAsState()
 
     // Permission state check
@@ -157,21 +170,25 @@ fun PhoneSenderScreen(
     fun startTvScan() {
         scope.launch {
             isScanning = true
-            val tvs = NetworkDiscovery.discoverTvs(context, timeoutMs = 2500)
+            val tvs = NetworkDiscovery.discoverTvs(context, timeoutMs = 3000)
             discoveredTvs = tvs
             isScanning = false
             if (tvs.isNotEmpty()) {
                 val first = tvs.first()
+                manualIpInput = first.ip
                 prefs.setTvConnection(first.ip, first.port, first.name)
                 webSocketClient.connect(first.ip, first.port)
-                snackbarHostState.showSnackbar("Discovered & connected to ${first.name}")
+                snackbarHostState.showSnackbar("Discovered & connected to ${first.name} (${first.ip})")
             } else {
-                snackbarHostState.showSnackbar("No TV found. Enter TV IP manually.")
+                snackbarHostState.showSnackbar("No TV discovered. Please verify Wi-Fi or enter TV IP manually.")
             }
         }
     }
 
-    // Installed apps loader
+    // Connection Details Dialog State
+    var showConnectionDialog by remember { mutableStateOf(false) }
+
+    // Installed apps loader with real app icons
     var installedApps by remember { mutableStateOf<List<AppItem>>(emptyList()) }
     var appSearchQuery by remember { mutableStateOf("") }
     var isLoadingApps by remember { mutableStateOf(false) }
@@ -183,13 +200,33 @@ fun PhoneSenderScreen(
             val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
                 .filter { (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0 || PreferencesManager.DEFAULT_ALLOWED_PRESETS.contains(it.packageName) }
                 .map { appInfo ->
+                    val iconBitmap = try {
+                        val drawable = pm.getApplicationIcon(appInfo)
+                        val bmp = if (drawable is BitmapDrawable && drawable.bitmap != null) {
+                            drawable.bitmap
+                        } else {
+                            val w = drawable.intrinsicWidth.coerceIn(48, 96)
+                            val h = drawable.intrinsicHeight.coerceIn(48, 96)
+                            val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                            val canvas = Canvas(b)
+                            drawable.setBounds(0, 0, canvas.width, canvas.height)
+                            drawable.draw(canvas)
+                            b
+                        }
+                        bmp.asImageBitmap()
+                    } catch (_: Exception) {
+                        null
+                    }
+
                     AppItem(
                         name = pm.getApplicationLabel(appInfo).toString(),
                         packageName = appInfo.packageName,
-                        isSystemApp = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                        isSystemApp = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0,
+                        iconBitmap = iconBitmap
                     )
                 }
                 .sortedBy { it.name.lowercase() }
+
             withContext(Dispatchers.Main) {
                 installedApps = apps
                 isLoadingApps = false
@@ -197,7 +234,7 @@ fun PhoneSenderScreen(
         }
     }
 
-    // Tabs for Phone screen: Overview / App Selection / Activity Log
+    // Tabs: Controls & Wi-Fi / App Filter / Mirror Log
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabs = listOf("Controls & Wi-Fi", "App Filter (${allowedPackages.size})", "Mirror Log")
 
@@ -240,15 +277,80 @@ fun PhoneSenderScreen(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Phone to Android TV Mirroring",
+                        text = "Phone to Google TV Mirroring",
                         color = Color(0xFF94A3B8),
                         fontSize = 12.sp
                     )
                 }
             }
 
-            // Connection Status Pill
-            ConnectionStatusBadge(status = connectionStatus, tvIp = savedTvIp)
+            // Interactive Connected to TV Button / Pill
+            InteractiveConnectionBadge(
+                status = connectionStatus,
+                tvIp = connectedHost ?: savedTvIp,
+                onClick = {
+                    if (connectionStatus == ConnectionStatus.CONNECTED) {
+                        showConnectionDialog = true
+                    } else if (savedTvIp.isNotBlank()) {
+                        webSocketClient.connect(savedTvIp, savedTvPort)
+                        scope.launch { snackbarHostState.showSnackbar("Connecting to $savedTvIp:$savedTvPort...") }
+                    } else {
+                        selectedTab = 0
+                        startTvScan()
+                    }
+                }
+            )
+        }
+
+        // Connection Details Modal Dialog
+        if (showConnectionDialog) {
+            AlertDialog(
+                onDismissRequest = { showConnectionDialog = false },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF34D399))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Connected to TV")
+                    }
+                },
+                text = {
+                    Column {
+                        Text(
+                            text = "Target TV: ${savedTvName.ifBlank { "Google TV" }}",
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFFF1F5F9)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "WebSocket Address: ws://${connectedHost ?: savedTvIp}:$savedTvPort",
+                            color = Color(0xFF94A3B8),
+                            fontSize = 13.sp
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Notifications from enabled apps are actively mirrored to this TV.",
+                            color = Color(0xFF38BDF8),
+                            fontSize = 12.sp
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showConnectionDialog = false }) {
+                        Text("Close")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            webSocketClient.disconnect()
+                            showConnectionDialog = false
+                            scope.launch { snackbarHostState.showSnackbar("Disconnected from TV") }
+                        }
+                    ) {
+                        Text("Disconnect", color = Color(0xFFF87171))
+                    }
+                }
+            )
         }
 
         // Tab Navigation
@@ -285,6 +387,7 @@ fun PhoneSenderScreen(
                 savedTvName = savedTvName,
                 manualIpInput = manualIpInput,
                 isScanning = isScanning,
+                discoveredTvs = discoveredTvs,
                 connectionStatus = connectionStatus,
                 lastError = lastError,
                 onRefreshPermission = { checkPermission() },
@@ -297,6 +400,12 @@ fun PhoneSenderScreen(
                     webSocketClient.connect(manualIpInput.trim(), 8080)
                     scope.launch { snackbarHostState.showSnackbar("Connecting to ${manualIpInput.trim()}...") }
                 },
+                onSelectDiscoveredTv = { tv ->
+                    manualIpInput = tv.ip
+                    prefs.setTvConnection(tv.ip, tv.port, tv.name)
+                    webSocketClient.connect(tv.ip, tv.port)
+                    scope.launch { snackbarHostState.showSnackbar("Connected to ${tv.name} (${tv.ip})") }
+                },
                 onScanWifi = { startTvScan() },
                 onSendTestNotification = {
                     val success = NotificationMirrorService.sendTestPayload(
@@ -307,9 +416,9 @@ fun PhoneSenderScreen(
                     )
                     scope.launch {
                         if (success) {
-                            snackbarHostState.showSnackbar("Test payload mirrored to TV!")
+                            snackbarHostState.showSnackbar("Test notification mirrored to TV!")
                         } else {
-                            snackbarHostState.showSnackbar("Sent test payload (queued, waiting for TV)")
+                            snackbarHostState.showSnackbar("Queued test notification (waiting for TV connection)")
                         }
                     }
                 }
@@ -352,6 +461,7 @@ private fun ControlsTab(
     savedTvName: String,
     manualIpInput: String,
     isScanning: Boolean,
+    discoveredTvs: List<DiscoveredTv>,
     connectionStatus: ConnectionStatus,
     lastError: String?,
     onRefreshPermission: () -> Unit,
@@ -360,10 +470,12 @@ private fun ControlsTab(
     onToggleOtp: (Boolean) -> Unit,
     onIpChanged: (String) -> Unit,
     onSaveConnectIp: () -> Unit,
+    onSelectDiscoveredTv: (DiscoveredTv) -> Unit,
     onScanWifi: () -> Unit,
     onSendTestNotification: () -> Unit
 ) {
     val context = LocalContext.current
+    val localSubnet = remember { NetworkDiscovery.getSubnetPrefix() }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -511,67 +623,108 @@ private fun ControlsTab(
             }
         }
 
-        // TV Local Network Connection Card
+        // Google TV / Android TV Target Area (Modern Redesigned Glassmorphic Card)
         item {
             Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
-                shape = RoundedCornerShape(16.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(
+                        1.dp,
+                        Brush.linearGradient(listOf(Color(0xFF38BDF8), Color(0xFF6366F1), Color(0x33FFFFFF))),
+                        RoundedCornerShape(18.dp)
+                    ),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF162032)),
+                shape = RoundedCornerShape(18.dp)
             ) {
-                Column(modifier = Modifier.padding(16.dp)) {
+                Column(modifier = Modifier.padding(18.dp)) {
+                    // Header with Target Icon & Auto Scan
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.Tv,
-                                contentDescription = "TV Connection",
-                                tint = Color(0xFF38BDF8),
-                                modifier = Modifier.size(22.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "Google TV / Android TV Target",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 16.sp
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .background(Color(0xFF0284C7), RoundedCornerShape(8.dp)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Tv,
+                                    contentDescription = "TV Connection",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = "Google TV / Android TV Target",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 15.sp
+                                )
+                                Text(
+                                    text = "Local Wi-Fi WebSocket Link",
+                                    color = Color(0xFF94A3B8),
+                                    fontSize = 11.sp
+                                )
+                            }
                         }
 
                         Button(
                             onClick = onScanWifi,
                             enabled = !isScanning,
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF334155)),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
+                            shape = RoundedCornerShape(10.dp),
                             modifier = Modifier.testTag("scan_wifi_button")
                         ) {
                             if (isScanning) {
                                 CircularProgressIndicator(
-                                    modifier = Modifier.size(16.dp),
+                                    modifier = Modifier.size(14.dp),
                                     color = Color.White,
                                     strokeWidth = 2.dp
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text("Scanning...", fontSize = 12.sp)
                             } else {
-                                Icon(Icons.Default.Wifi, contentDescription = "Scan", modifier = Modifier.size(16.dp))
+                                Icon(Icons.Default.Wifi, contentDescription = "Scan", modifier = Modifier.size(15.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("Auto Scan", fontSize = 12.sp)
+                                Text("Auto Scan", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                             }
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(14.dp))
 
-                    Text(
-                        text = "TV WebSocket Server IP (Port 8080):",
-                        color = Color(0xFF94A3B8),
-                        fontSize = 12.sp
-                    )
+                    // Local Subnet Helper Pill
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color(0xFF1E293B),
+                        modifier = Modifier.clickable {
+                            if (manualIpInput.isBlank() || !manualIpInput.startsWith(localSubnet)) {
+                                onIpChanged(localSubnet)
+                            }
+                        }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.Info, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Detected Subnet: ${localSubnet}xxx (Tap to prefill)",
+                                color = Color(0xFF94A3B8),
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
 
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
 
+                    // IP Input Field + Connect Button
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
@@ -579,11 +732,21 @@ private fun ControlsTab(
                         OutlinedTextField(
                             value = manualIpInput,
                             onValueChange = onIpChanged,
-                            placeholder = { Text("e.g. 192.168.1.100 or 10.0.2.2") },
+                            placeholder = { Text("e.g. ${localSubnet}100 or 10.0.2.2") },
                             modifier = Modifier
                                 .weight(1f)
                                 .testTag("tv_ip_input"),
                             singleLine = true,
+                            leadingIcon = {
+                                Icon(Icons.Default.Cast, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(18.dp))
+                            },
+                            trailingIcon = {
+                                if (manualIpInput.isNotEmpty()) {
+                                    IconButton(onClick = { onIpChanged("") }) {
+                                        Icon(Icons.Default.Clear, contentDescription = "Clear", tint = Color(0xFF94A3B8), modifier = Modifier.size(18.dp))
+                                    }
+                                }
+                            },
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = Color(0xFF38BDF8),
                                 unfocusedBorderColor = Color(0xFF475569),
@@ -594,14 +757,15 @@ private fun ControlsTab(
                             )
                         )
 
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(10.dp))
 
                         Button(
                             onClick = onSaveConnectIp,
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
                             modifier = Modifier.testTag("connect_tv_button")
                         ) {
-                            Text("Connect")
+                            Text("Connect", fontWeight = FontWeight.Bold)
                         }
                     }
 
@@ -612,6 +776,79 @@ private fun ControlsTab(
                             color = Color(0xFFF87171),
                             fontSize = 11.sp
                         )
+                    }
+
+                    // Discovered TVs nearby section (if scan returned devices)
+                    if (discoveredTvs.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Text(
+                            text = "Discovered TVs on Local Network (${discoveredTvs.size}):",
+                            color = Color(0xFF38BDF8),
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 12.sp
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            discoveredTvs.forEach { tv ->
+                                val isCurrent = tv.ip == manualIpInput
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (isCurrent) Color(0xFF0F3B57) else Color(0xFF1E293B),
+                                    border = CardDefaults.outlinedCardBorder().copy(
+                                        brush = Brush.linearGradient(
+                                            if (isCurrent) listOf(Color(0xFF38BDF8), Color(0xFF0284C7))
+                                            else listOf(Color(0xFF334155), Color(0xFF334155))
+                                        )
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onSelectDiscoveredTv(tv) }
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = Icons.Default.Tv,
+                                                contentDescription = null,
+                                                tint = Color(0xFF38BDF8),
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Column {
+                                                Text(
+                                                    text = tv.name,
+                                                    color = Color.White,
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 13.sp
+                                                )
+                                                Text(
+                                                    text = "${tv.ip}:${tv.port} • ${tv.source}",
+                                                    color = Color(0xFF94A3B8),
+                                                    fontSize = 10.sp
+                                                )
+                                            }
+                                        }
+
+                                        Button(
+                                            onClick = { onSelectDiscoveredTv(tv) },
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = if (isCurrent) Color(0xFF10B981) else Color(0xFF0284C7)
+                                            ),
+                                            shape = RoundedCornerShape(8.dp),
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                            modifier = Modifier.height(30.dp)
+                                        ) {
+                                            Text(if (isCurrent) "Connected" else "Select", fontSize = 11.sp)
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(14.dp))
@@ -726,6 +963,10 @@ private fun ControlsTab(
     }
 }
 
+/**
+ * Enhanced, Visual App Filter Tab with Real App Icons,
+ * Filter Ratio Gauge, and Visual Categories.
+ */
 @Composable
 private fun AppFilterTab(
     installedApps: List<AppItem>,
@@ -738,30 +979,112 @@ private fun AppFilterTab(
     onSelectNone: () -> Unit,
     onSelectPresetsOnly: () -> Unit
 ) {
-    val filteredApps = remember(installedApps, searchQuery) {
-        if (searchQuery.isBlank()) {
-            installedApps
-        } else {
-            installedApps.filter {
-                it.name.contains(searchQuery, ignoreCase = true) ||
-                        it.packageName.contains(searchQuery, ignoreCase = true)
+    var activeCategoryFilter by remember { mutableStateOf("ALL") }
+
+    val filteredApps = remember(installedApps, searchQuery, activeCategoryFilter, allowedPackages) {
+        installedApps.filter { app ->
+            val matchesSearch = searchQuery.isBlank() ||
+                    app.name.contains(searchQuery, ignoreCase = true) ||
+                    app.packageName.contains(searchQuery, ignoreCase = true)
+
+            val isChecked = allowedPackages.contains(app.packageName)
+            val isSensitive = app.name.contains("Bank", ignoreCase = true) ||
+                    app.packageName.contains("banking", ignoreCase = true) ||
+                    app.packageName.contains("crypto", ignoreCase = true) ||
+                    app.packageName.contains("wallet", ignoreCase = true)
+
+            val isChat = PreferencesManager.DEFAULT_ALLOWED_PRESETS.contains(app.packageName) ||
+                    app.name.contains("Zalo", ignoreCase = true) ||
+                    app.name.contains("Messenger", ignoreCase = true) ||
+                    app.name.contains("Telegram", ignoreCase = true) ||
+                    app.name.contains("WhatsApp", ignoreCase = true) ||
+                    app.name.contains("Message", ignoreCase = true)
+
+            val matchesCategory = when (activeCategoryFilter) {
+                "ALLOWED" -> isChecked
+                "CHAT" -> isChat
+                "SENSITIVE" -> isSensitive
+                else -> true
             }
+
+            matchesSearch && matchesCategory
         }
     }
+
+    val allowedCount = allowedPackages.size
+    val totalCount = installedApps.size.coerceAtLeast(1)
+    val ratio = (allowedCount.toFloat() / totalCount).coerceIn(0f, 1f)
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        // Search & Shortcuts
+        // Visual Analytics Meter Card
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column {
+                        Text(
+                            text = "Filter Status: $allowedCount of $totalCount Allowed",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                        Text(
+                            text = "Only allowed apps trigger pop-up notifications on TV",
+                            color = Color(0xFF94A3B8),
+                            fontSize = 11.sp
+                        )
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFF0284C7)
+                    ) {
+                        Text(
+                            text = "${(ratio * 100).toInt()}% Active",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Progress ratio bar
+                LinearProgressIndicator(
+                    progress = { ratio },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp)),
+                    color = Color(0xFF10B981),
+                    trackColor = Color(0xFF334155)
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // Search Bar
         OutlinedTextField(
             value = searchQuery,
             onValueChange = onSearchChanged,
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("app_search_input"),
-            placeholder = { Text("Search installed apps (e.g. Zalo, Messenger, Bank)...") },
+            placeholder = { Text("Search installed apps (e.g. Zalo, Bank)...") },
             leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search", tint = Color(0xFF94A3B8)) },
             trailingIcon = {
                 if (searchQuery.isNotEmpty()) {
@@ -779,9 +1102,54 @@ private fun AppFilterTab(
             singleLine = true
         )
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
-        // Quick action filters
+        // Visual Category Filter Chips
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            FilterChip(
+                selected = activeCategoryFilter == "ALL",
+                onClick = { activeCategoryFilter = "ALL" },
+                label = { Text("All", fontSize = 11.sp) },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = Color(0xFF0284C7),
+                    selectedLabelColor = Color.White
+                )
+            )
+            FilterChip(
+                selected = activeCategoryFilter == "ALLOWED",
+                onClick = { activeCategoryFilter = "ALLOWED" },
+                label = { Text("Active ($allowedCount)", fontSize = 11.sp) },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = Color(0xFF059669),
+                    selectedLabelColor = Color.White
+                )
+            )
+            FilterChip(
+                selected = activeCategoryFilter == "CHAT",
+                onClick = { activeCategoryFilter = "CHAT" },
+                label = { Text("Social & Chat", fontSize = 11.sp) },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = Color(0xFF6366F1),
+                    selectedLabelColor = Color.White
+                )
+            )
+            FilterChip(
+                selected = activeCategoryFilter == "SENSITIVE",
+                onClick = { activeCategoryFilter = "SENSITIVE" },
+                label = { Text("Banking", fontSize = 11.sp) },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = Color(0xFFD97706),
+                    selectedLabelColor = Color.White
+                )
+            )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Quick action bulk buttons
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -811,14 +1179,6 @@ private fun AppFilterTab(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        Text(
-            text = "Choose which apps are allowed to mirror notifications on TV (e.g. enable Zalo/Messenger, disable Banking):",
-            color = Color(0xFF94A3B8),
-            fontSize = 12.sp
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
         if (isLoading) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator(color = Color(0xFF38BDF8))
@@ -840,7 +1200,12 @@ private fun AppFilterTab(
                             .fillMaxWidth()
                             .clickable { onToggleApp(app.packageName, !isChecked) }
                             .testTag("app_item_${app.packageName}"),
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (isChecked) Color(0xFF1E2E42) else Color(0xFF1E293B)
+                        ),
+                        border = if (isChecked) CardDefaults.outlinedCardBorder().copy(
+                            brush = Brush.linearGradient(listOf(Color(0xFF0284C7), Color(0xFF059669)))
+                        ) else null,
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Row(
@@ -851,21 +1216,32 @@ private fun AppFilterTab(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .background(
-                                            if (isChecked) Color(0xFF0284C7) else Color(0xFF334155),
-                                            RoundedCornerShape(8.dp)
-                                        ),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = app.name.take(1).uppercase(),
-                                        color = Color.White,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 16.sp
+                                // Real App Icon or Letter fallback
+                                if (app.iconBitmap != null) {
+                                    Image(
+                                        bitmap = app.iconBitmap,
+                                        contentDescription = app.name,
+                                        modifier = Modifier
+                                            .size(38.dp)
+                                            .clip(RoundedCornerShape(8.dp))
                                     )
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(38.dp)
+                                            .background(
+                                                if (isChecked) Color(0xFF0284C7) else Color(0xFF334155),
+                                                RoundedCornerShape(8.dp)
+                                            ),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = app.name.take(1).uppercase(),
+                                            color = Color.White,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 16.sp
+                                        )
+                                    }
                                 }
 
                                 Spacer(modifier = Modifier.width(12.dp))
@@ -1059,29 +1435,47 @@ private fun MirrorLogTab(
     }
 }
 
+/**
+ * Interactive Top-Right Connection Status Button.
+ * Tapping triggers connection, opens TV status modal, or retries connection.
+ */
 @Composable
-fun ConnectionStatusBadge(status: ConnectionStatus, tvIp: String) {
+fun InteractiveConnectionBadge(
+    status: ConnectionStatus,
+    tvIp: String,
+    onClick: () -> Unit
+) {
     val (bgColor, textColor, text) = when (status) {
-        ConnectionStatus.CONNECTED -> Triple(Color(0xFF065F46), Color(0xFF34D399), "Connected to TV")
+        ConnectionStatus.CONNECTED -> Triple(Color(0xFF065F46), Color(0xFF34D399), if (tvIp.isNotBlank()) "Connected • $tvIp" else "Connected to TV")
         ConnectionStatus.CONNECTING -> Triple(Color(0xFF854D0E), Color(0xFFFDE047), "Connecting...")
-        ConnectionStatus.DISCONNECTED -> Triple(Color(0xFF334155), Color(0xFF94A3B8), "Disconnected")
-        ConnectionStatus.ERROR -> Triple(Color(0xFF7F1D1D), Color(0xFFFCA5A5), "Error")
+        ConnectionStatus.DISCONNECTED -> Triple(Color(0xFF334155), Color(0xFF94A3B8), if (tvIp.isNotBlank()) "Offline • Tap to Connect" else "Not Paired")
+        ConnectionStatus.ERROR -> Triple(Color(0xFF7F1D1D), Color(0xFFFCA5A5), "Error • Tap to Retry")
     }
 
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = bgColor,
-        modifier = Modifier.testTag("connection_status_badge")
+        modifier = Modifier
+            .clickable { onClick() }
+            .testTag("connection_status_badge")
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier
-                    .size(8.dp)
-                    .background(textColor, CircleShape)
-            )
+            if (status == ConnectionStatus.CONNECTING) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(10.dp),
+                    color = textColor,
+                    strokeWidth = 2.dp
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .background(textColor, CircleShape)
+                )
+            }
             Spacer(modifier = Modifier.width(6.dp))
             Text(
                 text = text,
@@ -1091,4 +1485,10 @@ fun ConnectionStatusBadge(status: ConnectionStatus, tvIp: String) {
             )
         }
     }
+}
+
+// Backward compatible alias
+@Composable
+fun ConnectionStatusBadge(status: ConnectionStatus, tvIp: String) {
+    InteractiveConnectionBadge(status = status, tvIp = tvIp, onClick = {})
 }

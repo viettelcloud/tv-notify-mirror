@@ -99,6 +99,7 @@ class NotificationMirrorService : NotificationListenerService() {
     }
 
     private lateinit var prefs: PreferencesManager
+    private val recentNotifications = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     override fun onCreate() {
         super.onCreate()
@@ -161,6 +162,19 @@ class NotificationMirrorService : NotificationListenerService() {
             pm.getApplicationLabel(appInfo).toString()
         } catch (e: Exception) {
             pkgName.substringAfterLast('.')
+        }
+
+        // De-duplication check: ignore rapid duplicate notifications within 8 seconds
+        val duplicateKey = "$pkgName|$title|$text"
+        val now = System.currentTimeMillis()
+        val lastTime = recentNotifications[duplicateKey]
+        if (lastTime != null && (now - lastTime) < 8000L) {
+            Log.d(TAG, "Skipping duplicate notification for $duplicateKey")
+            return
+        }
+        recentNotifications[duplicateKey] = now
+        if (recentNotifications.size > 100) {
+            recentNotifications.entries.removeIf { (now - it.value) > 15000L }
         }
 
         // Granular package filter check

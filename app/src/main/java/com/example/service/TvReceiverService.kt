@@ -1,5 +1,6 @@
 package com.example.service
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -9,8 +10,10 @@ import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
 import android.media.ToneGenerator
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -28,6 +31,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 
 class TvReceiverService : Service() {
 
@@ -49,6 +53,10 @@ class TvReceiverService : Service() {
         private val _notificationHistory = MutableStateFlow<List<NotificationPayload>>(emptyList())
         val notificationHistory: StateFlow<List<NotificationPayload>> = _notificationHistory.asStateFlow()
 
+        // Active stacked notifications for bottom-right display
+        private val _activeStack = MutableStateFlow<List<NotificationPayload>>(emptyList())
+        val activeStack: StateFlow<List<NotificationPayload>> = _activeStack.asStateFlow()
+
         private val _activePopup = MutableStateFlow<NotificationPayload?>(null)
         val activePopup: StateFlow<NotificationPayload?> = _activePopup.asStateFlow()
 
@@ -61,15 +69,26 @@ class TvReceiverService : Service() {
 
         fun dismissActivePopup() {
             _activePopup.value = null
+            _activeStack.value = emptyList()
+        }
+
+        fun dismissStackedItem(id: String) {
+            _activeStack.value = _activeStack.value.filter { it.id != id }
+            if (_activePopup.value?.id == id) {
+                _activePopup.value = _activeStack.value.lastOrNull()
+            }
         }
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var webSocketServer: TvWebSocketServer? = null
     private var discoveryJob: Job? = null
-    private var autoDismissJob: Job? = null
     private var toneGen: ToneGenerator? = null
     private lateinit var prefs: PreferencesManager
+
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+    private val recentTvNotifications = ConcurrentHashMap<String, Long>()
 
     override fun onCreate() {
         super.onCreate()
@@ -93,7 +112,7 @@ class TvReceiverService : Service() {
                 val testPayload = NotificationPayload(
                     appName = "Zalo",
                     title = "John Doe",
-                    message = "Hello, see you on TV!",
+                    message = "Hello, see you on TV! (Test overlay)",
                     timestamp = System.currentTimeMillis(),
                     privacyMode = false,
                     packageName = "com.zing.zalo"
@@ -108,8 +127,26 @@ class TvReceiverService : Service() {
         return START_STICKY
     }
 
+    @SuppressLint("WakelockTimeout")
     private fun startServer() {
         if (webSocketServer != null) return
+
+        // Acquire partial wakelock & wifilock so background daemon stays responsive on TV
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            wakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "CastNotify:TvReceiverDaemon")?.apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            wifiLock = wm?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "CastNotify:TvWifiLock")?.apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not acquire background locks", e)
+        }
 
         val port = prefs.tvPort.value
         serviceScope.launch {
@@ -128,7 +165,7 @@ class TvReceiverService : Service() {
                 )
                 webSocketServer?.start()
                 _isServerRunning.value = true
-                Log.d(TAG, "TvWebSocketServer listening on port $port")
+                Log.d(TAG, "TvWebSocketServer listening on port $port as daemon")
 
                 // Start UDP discovery responder
                 discoveryJob?.cancel()
@@ -140,7 +177,7 @@ class TvReceiverService : Service() {
                     )
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to start TV server", e)
+                Log.e(TAG, "Failed to start TV server daemon", e)
                 _isServerRunning.value = false
                 _lastError.value = e.localizedMessage
             }
@@ -148,11 +185,26 @@ class TvReceiverService : Service() {
     }
 
     private fun handleIncomingPayload(payload: NotificationPayload) {
+        // De-duplication check: ignore duplicate notifications arriving within 8 seconds
+        val duplicateKey = "${payload.packageName}|${payload.title}|${payload.message}"
+        val now = System.currentTimeMillis()
+        val lastSeen = recentTvNotifications[duplicateKey]
+        if (lastSeen != null && (now - lastSeen) < 8000L) {
+            Log.d(TAG, "Ignoring duplicate notification on TV receiver: $duplicateKey")
+            return
+        }
+        recentTvNotifications[duplicateKey] = now
+        if (recentTvNotifications.size > 100) {
+            recentTvNotifications.entries.removeIf { (now - it.value) > 15000L }
+        }
+
         // Add to history
         val updatedHistory = listOf(payload) + _notificationHistory.value.take(49)
         _notificationHistory.value = updatedHistory
 
-        // Set active popup
+        // Add to active stack (up to 4 stacked banners)
+        val currentStack = _activeStack.value.filter { it.id != payload.id }
+        _activeStack.value = (currentStack + payload).takeLast(4)
         _activePopup.value = payload
 
         // Play subtle sound chime if enabled
@@ -172,20 +224,19 @@ class TvReceiverService : Service() {
             startService(overlayIntent)
         }
 
-        // Auto-dismiss popup after 5 seconds (or user configured duration)
-        autoDismissJob?.cancel()
-        autoDismissJob = serviceScope.launch {
-            val durationSec = prefs.popupDuration.value.coerceIn(3, 15)
+        // Auto-dismiss this specific notification from stack after 5 seconds
+        serviceScope.launch {
+            val durationSec = 5L // 5 seconds display requirement
             delay(durationSec * 1000L)
+            _activeStack.value = _activeStack.value.filter { it.id != payload.id }
             if (_activePopup.value?.id == payload.id) {
-                _activePopup.value = null
+                _activePopup.value = _activeStack.value.lastOrNull()
             }
         }
     }
 
     private fun stopServer() {
         discoveryJob?.cancel()
-        autoDismissJob?.cancel()
         try {
             webSocketServer?.stop()
         } catch (e: Exception) {
@@ -194,6 +245,11 @@ class TvReceiverService : Service() {
         webSocketServer = null
         _isServerRunning.value = false
         _connectedClientsCount.value = 0
+
+        try {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+            if (wifiLock?.isHeld == true) wifiLock?.release()
+        } catch (_: Exception) {}
     }
 
     private fun buildForegroundNotification(): Notification {
@@ -207,8 +263,8 @@ class TvReceiverService : Service() {
         val localIp = NetworkDiscovery.getLocalIpAddress()
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("CastNotify TV Receiver Active")
-            .setContentText("Listening on $localIp:8080 (Ready for phone notifications)")
+            .setContentTitle("CastNotify TV Daemon Running")
+            .setContentText("Listening on $localIp:8080 (Ready in Background)")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
