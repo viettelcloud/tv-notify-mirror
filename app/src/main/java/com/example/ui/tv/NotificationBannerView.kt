@@ -29,6 +29,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.runtime.key
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -72,33 +73,46 @@ fun BottomRightOverlayStack(
     ) {
         stackedItems.forEach { payload ->
             key(payload.id) {
-                var progress by remember(payload.id) { mutableFloatStateOf(1f) }
-
-                LaunchedEffect(payload.id) {
-                    val startTime = System.currentTimeMillis()
-                    val totalMs = durationSeconds * 1000L
-                    while (System.currentTimeMillis() - startTime < totalMs) {
-                        val elapsed = System.currentTimeMillis() - startTime
-                        progress = (1f - (elapsed.toFloat() / totalMs)).coerceIn(0f, 1f)
-                        delay(50)
-                    }
-                    progress = 0f
-                    onDismissItem(payload.id)
-                }
-
-                AnimatedVisibility(
-                    visible = true,
-                    enter = slideInHorizontally(initialOffsetX = { it }) + fadeIn(),
-                    exit = slideOutHorizontally(targetOffsetX = { it }) + fadeOut()
-                ) {
-                    NotificationBannerCard(
-                        payload = payload,
-                        progress = progress,
-                        onDismiss = { onDismissItem(payload.id) }
-                    )
-                }
+                StackedBannerItem(
+                    payload = payload,
+                    durationSeconds = durationSeconds,
+                    onDismiss = { onDismissItem(payload.id) }
+                )
             }
         }
+    }
+}
+
+@Composable
+private fun StackedBannerItem(
+    payload: NotificationPayload,
+    durationSeconds: Int,
+    onDismiss: () -> Unit
+) {
+    var progress by remember(payload.id) { mutableFloatStateOf(1f) }
+
+    LaunchedEffect(payload.id) {
+        val startTime = System.currentTimeMillis()
+        val totalMs = durationSeconds * 1000L
+        while (System.currentTimeMillis() - startTime < totalMs) {
+            val elapsed = System.currentTimeMillis() - startTime
+            progress = (1f - (elapsed.toFloat() / totalMs)).coerceIn(0f, 1f)
+            delay(50)
+        }
+        progress = 0f
+        onDismiss()
+    }
+
+    AnimatedVisibility(
+        visible = true,
+        enter = slideInHorizontally(initialOffsetX = { it }) + fadeIn(),
+        exit = slideOutHorizontally(targetOffsetX = { it }) + fadeOut()
+    ) {
+        NotificationBannerCard(
+            payload = payload,
+            progress = progress,
+            onDismiss = onDismiss
+        )
     }
 }
 
